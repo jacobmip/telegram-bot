@@ -15,9 +15,15 @@ const ALLOWED = (process.env.ALLOWED_CHAT_IDS || '')
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
-// Simple per-chat memory (kept in RAM; cleared on restart). Lets Lani remember
-// the conversation instead of treating every message as brand new.
+// Simple per-chat memory (kept in RAM; cleared on restart). Lets the manager
+// remember the conversation instead of treating every message as brand new.
 const histories = new Map();
+
+// Chats with a write preview waiting on a yes/no. The next message in one of
+// these is the approval, so it runs on the careful model instead of the cheap
+// one — see the model-tiering note in agent.js. Cleared on restart, which is
+// correct: a restart also invalidates the confirm tokens.
+const awaitingConfirm = new Set();
 
 // Telegram caps messages at 4096 chars; chunk long replies.
 async function sendLong(chatId, text) {
@@ -47,6 +53,7 @@ bot.on('message', async (msg) => {
   // /reset or /new clears this chat's memory.
   if (text === '/reset' || text === '/new') {
     histories.delete(chatId);
+    awaitingConfirm.delete(chatId);
     await bot.sendMessage(chatId, 'Fresh conversation started.');
     return;
   }
@@ -59,15 +66,19 @@ bot.on('message', async (msg) => {
 
     // 'manager' = the HI Grade Manager: read/write on the invoicing app and the
     // job schedule. Every write is preview-then-confirm inside agent-writes.js.
-    const { reply, history: newHistory } = await runAgent(text, history, {
+    const { reply, history: newHistory, pendingWrite, model } = await runAgent(text, history, {
       voice: false,
       agent: 'manager',
+      escalate: awaitingConfirm.has(chatId),
     });
 
     clearInterval(keepTyping);
 
     // Store only the clean text history the agent hands back (never tool blocks).
     histories.set(chatId, newHistory);
+    if (pendingWrite) awaitingConfirm.add(chatId);
+    else awaitingConfirm.delete(chatId);
+    console.log(`${chatId} ${model}${pendingWrite ? ' (awaiting confirm)' : ''}`);
 
     await sendLong(chatId, reply);
   } catch (err) {
