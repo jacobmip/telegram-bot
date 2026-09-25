@@ -2,7 +2,7 @@ const path = require('path');
 require('dotenv').config(); // telegram-bot/.env → TELEGRAM_TOKEN, ANTHROPIC_API_KEY, ALLOWED_CHAT_IDS
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); // AIOS/.env → SUPABASE_* (shared, not overridden)
 const TelegramBot = require('node-telegram-bot-api').default || require('node-telegram-bot-api');
-const { runAgent } = require('../AI-OS/agent.js'); // shared brain (the voice orb runs Lani off the same file)
+const { runAgent, describeFailure } = require('../AI-OS/agent.js'); // shared brain (the voice orb runs Lani off the same file)
 
 // Allowlist: only these Telegram chat IDs may drive the manager. Comma-separated in
 // .env, e.g. ALLOWED_CHAT_IDS=12345678. Hard security boundary — the bot can
@@ -71,8 +71,11 @@ bot.on('message', async (msg) => {
 
     await sendLong(chatId, reply);
   } catch (err) {
+    // One scannable line first, then the full object. Grepping the log for
+    // 'FAILED' beats scrolling past a 40-line SDK dump to find the cause.
+    console.error(`FAILED ${new Date().toISOString()} status=${err?.status ?? '-'}: ${err?.message || err}`);
     console.error(err);
-    await bot.sendMessage(chatId, 'Something went wrong. Try again.');
+    await bot.sendMessage(chatId, describeFailure(err));
   }
 });
 
