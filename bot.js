@@ -1,8 +1,8 @@
 const path = require('path');
 require('dotenv').config(); // telegram-bot/.env → TELEGRAM_TOKEN, ANTHROPIC_API_KEY, ALLOWED_CHAT_IDS
-require('dotenv').config({ path: path.join(__dirname, '..', 'AIOS', '.env') }); // AIOS/.env → SUPABASE_* (shared, not overridden)
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); // AIOS/.env → SUPABASE_* (shared, not overridden)
 const TelegramBot = require('node-telegram-bot-api').default || require('node-telegram-bot-api');
-const { runAgent } = require('../AIOS/agent.js'); // shared Lani brain (the voice orb uses the same one)
+const { runAgent } = require('../AI-OS/agent.js'); // shared Lani brain (the voice orb uses the same one)
 
 // Allowlist: only these Telegram chat IDs may drive Lani. Comma-separated in
 // .env, e.g. ALLOWED_CHAT_IDS=12345678. Hard security boundary — the bot can
@@ -70,5 +70,5 @@ bot.on('message', async (msg) => {
   }
 });
 
-console.log('Lani (Telegram) is running. Brain =', path.join(__dirname, '..', 'AIOS', 'agent.js'));
+console.log('Lani (Telegram) is running. Brain =', path.join(__dirname, '..', 'AI-OS', 'agent.js'));
 console.log(ALLOWED.length ? `Allowlist: ${ALLOWED.join(', ')}` : 'NO ALLOWLIST SET — bot is locked until ALLOWED_CHAT_IDS is set.');
