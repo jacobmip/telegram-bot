@@ -2,11 +2,12 @@ const path = require('path');
 require('dotenv').config(); // telegram-bot/.env → TELEGRAM_TOKEN, ANTHROPIC_API_KEY, ALLOWED_CHAT_IDS
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); // AIOS/.env → SUPABASE_* (shared, not overridden)
 const TelegramBot = require('node-telegram-bot-api').default || require('node-telegram-bot-api');
-const { runAgent } = require('../AI-OS/agent.js'); // shared Lani brain (the voice orb uses the same one)
+const { runAgent } = require('../AI-OS/agent.js'); // shared brain (the voice orb runs Lani off the same file)
 
-// Allowlist: only these Telegram chat IDs may drive Lani. Comma-separated in
+// Allowlist: only these Telegram chat IDs may drive the manager. Comma-separated in
 // .env, e.g. ALLOWED_CHAT_IDS=12345678. Hard security boundary — the bot can
-// read and write the live invoicing database, so keep this locked.
+// create invoices, take payments and book jobs in the live database, so keep
+// this locked.
 const ALLOWED = (process.env.ALLOWED_CHAT_IDS || '')
   .split(',')
   .map(s => s.trim())
@@ -56,7 +57,12 @@ bot.on('message', async (msg) => {
     await bot.sendChatAction(chatId, 'typing');
     const keepTyping = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 5000);
 
-    const { reply, history: newHistory } = await runAgent(text, history, { voice: false });
+    // 'manager' = the HI Grade Manager: read/write on the invoicing app and the
+    // job schedule. Every write is preview-then-confirm inside agent-writes.js.
+    const { reply, history: newHistory } = await runAgent(text, history, {
+      voice: false,
+      agent: 'manager',
+    });
 
     clearInterval(keepTyping);
 
@@ -70,5 +76,5 @@ bot.on('message', async (msg) => {
   }
 });
 
-console.log('Lani (Telegram) is running. Brain =', path.join(__dirname, '..', 'AI-OS', 'agent.js'));
+console.log('HI Grade Manager (Telegram) is running. Brain =', path.join(__dirname, '..', 'AI-OS', 'agent.js'));
 console.log(ALLOWED.length ? `Allowlist: ${ALLOWED.join(', ')}` : 'NO ALLOWLIST SET — bot is locked until ALLOWED_CHAT_IDS is set.');
