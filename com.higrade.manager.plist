@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.higrade.manager</string>
+
+  <!-- node here is /Users/jake/.local/bin/node, a symlink into Hermes's bundled
+       runtime. launchd gets no shell PATH, so this must be absolute. If Hermes is
+       ever removed or moved, fix this path. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jake/.local/bin/node</string>
+    <string>bot.js</string>
+  </array>
+
+  <!-- dotenv reads ./.env from the working directory, so this has to be the repo. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/jake/AIOS/telegram-bot</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if it dies. Throttled so a bad token crash-loops slowly instead of
+       hammering Telegram and filling the log. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jake/Library/Logs/higrade-manager.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jake/Library/Logs/higrade-manager.error.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
