@@ -58,6 +58,42 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  // Outbound call approval gate. scripts/outbound_call.py (AI-OS) texts Jake
+  // "Reply APPROVE <id> or CANCEL <id>" and waits on call_queue.approval. This
+  // bot owns Telegram's getUpdates stream, so it records the answer; the script
+  // never polls Telegram. Only counts while the row is queued and was asked.
+  const gate = text.match(/^(approve|cancel)\s+#?(\d+)\s*$/i);
+  if (gate) {
+    const approved = gate[1].toLowerCase() === 'approve';
+    const id = gate[2];
+    try {
+      const url = `${(process.env.SUPABASE_URL || '').replace(/\/$/, '')}/rest/v1/call_queue` +
+        `?id=eq.${id}&status=eq.queued&approval_asked_at=not.is.null&approval=is.null`;
+      const r = await fetch(url, {
+        method: 'PATCH',
+        headers: {
+          apikey: process.env.SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify({ approval: approved ? 'approved' : 'denied' }),
+      });
+      const rows = r.ok ? await r.json() : [];
+      if (rows.length) {
+        await bot.sendMessage(chatId, approved ? `Approved call #${id}. Dialing.` : `Call #${id} cancelled.`);
+        return;
+      }
+      // Not waiting on an answer. Fall through if it was not an outbound-call
+      // reply at all; say so when it clearly was.
+      await bot.sendMessage(chatId, `Call #${id} is not waiting for an answer (already handled, timed out, or not queued).`);
+      return;
+    } catch (e) {
+      await bot.sendMessage(chatId, `Could not record that answer (${e.message}). The call will not dial.`);
+      return;
+    }
+  }
+
   const history = histories.get(chatId) || [];
 
   try {
