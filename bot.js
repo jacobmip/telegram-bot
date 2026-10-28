@@ -100,7 +100,7 @@ async function handleEstimatorReply(chatId, approved, invoiceId) {
     const first = named ? String(inv.client_name).trim().split(/\s+/)[0] : '';
     const when = visitPhrase(inv);
     const parts = prop.items.map(it => `${it.name} ~${usd(it.price * (it.qty || 1))}`).join(', ');
-    const body =
+    const body = prop.sms_body ||
       `Aloha${first ? ' ' + first : ''}, based on what you've described, here's a rough ballpark for the work: ${parts}. ` +
       `Total estimate: around ${usd(prop.total)} before tax. This is just a ballpark — the team will confirm the exact price when they come out. ` +
       (when ? `Does ${when} still work for you?` : 'What day works best for you?');
