@@ -33,6 +33,115 @@ async function sendLong(chatId, text) {
   }
 }
 
+// ── AI ballpark estimate approval (web / SMS / Yelp leads) ────────────────
+// higrade-invoicing/api/_lib/lead-estimate.js DMs Jake a proposal and parks it
+// in invoices.estimator_items. "APPROVE EST1234" texts the customer the ballpark
+// and swaps the proposal in for the generic line item; "DECLINE EST1234" does
+// nothing else. Nothing reaches the customer before APPROVE.
+const APP_URL = process.env.APP_URL || 'https://higrade-invoicing.vercel.app';
+const SB = () => (process.env.SUPABASE_URL || '').replace(/\/$/, '') + '/rest/v1';
+const sbHeaders = (extra = {}) => ({
+  apikey: process.env.SUPABASE_SERVICE_KEY,
+  Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+  'Content-Type': 'application/json',
+  ...extra,
+});
+const usd = (n) => `$${Math.round(n).toLocaleString('en-US')}`;
+
+// visits[0].start / gcal_date are Hawaii wall-clock text, "YYYY-MM-DDTHH:MM".
+// Parsed by hand: new Date(string) would shift it by this machine's zone.
+function visitPhrase(inv) {
+  const raw = (Array.isArray(inv.visits) && inv.visits[0]?.start) || inv.gcal_date || '';
+  const m = String(raw).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  const day = d.toLocaleDateString('en-US', { weekday: 'long' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${day} at ${time}`;
+}
+
+async function handleEstimatorReply(chatId, approved, invoiceId) {
+  const base = SB();
+  const id = encodeURIComponent(invoiceId);
+  // Atomic claim: only a proposal that is still waiting can be answered, once.
+  const claim = await fetch(
+    `${base}/invoices?id=eq.${id}&estimator_items=not.is.null&estimator_approval=is.null`,
+    { method: 'PATCH', headers: sbHeaders({ Prefer: 'return=representation' }),
+      body: JSON.stringify({ estimator_approval: approved ? 'approved' : 'declined' }) });
+  const claimed = claim.ok ? await claim.json() : [];
+  if (!claimed.length) {
+    await bot.sendMessage(chatId, `${invoiceId} is not waiting on an estimate answer (already handled, or no proposal).`);
+    return;
+  }
+  if (!approved) {
+    await bot.sendMessage(chatId, `Declined ${invoiceId}. Nothing sent.`);
+    return;
+  }
+
+  const revert = () => fetch(`${base}/invoices?id=eq.${id}`, {
+    method: 'PATCH', headers: sbHeaders(), body: JSON.stringify({ estimator_approval: null }) }).catch(() => {});
+  try {
+    const inv = (await (await fetch(
+      `${base}/invoices?id=eq.${id}&select=id,client_id,client_name,client_info,visits,gcal_date,estimator_items,invoice_items(id,name,price)&limit=1`,
+      { headers: sbHeaders() })).json())[0];
+    const prop = inv.estimator_items;
+    let phone = inv.client_info?.phone || null;
+    if (!phone && inv.client_id) {
+      const c = (await (await fetch(`${base}/clients?id=eq.${inv.client_id}&select=phone&limit=1`, { headers: sbHeaders() })).json())[0];
+      phone = c?.phone || null;
+    }
+    if (!phone) { await revert(); await bot.sendMessage(chatId, `${invoiceId}: no phone number on file, nothing sent. Still pending.`); return; }
+
+    const settings = await (await fetch(`${base}/settings?key=eq.sms_webhook_secret&select=value&limit=1`, { headers: sbHeaders() })).json();
+    const secret = settings?.[0]?.value;
+    if (!secret) { await revert(); await bot.sendMessage(chatId, `${invoiceId}: sms_webhook_secret missing, nothing sent. Still pending.`); return; }
+
+    const named = !/no name given|missed call|unknown/i.test(inv.client_name || '');
+    const first = named ? String(inv.client_name).trim().split(/\s+/)[0] : '';
+    const when = visitPhrase(inv);
+    const parts = prop.items.map(it => `${it.name} ~${usd(it.price * (it.qty || 1))}`).join(', ');
+    const body =
+      `Aloha${first ? ' ' + first : ''}, based on what you've described, here's a rough ballpark for the work: ${parts}. ` +
+      `Total estimate: around ${usd(prop.total)} before tax. This is just a ballpark — the team will confirm the exact price when they come out. ` +
+      (when ? `Does ${when} still work for you?` : 'What day works best for you?');
+
+    const r = await fetch(`${APP_URL}/api/sms-inbound`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ to: phone, body, invoice_id: invoiceId }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) {
+      await revert();
+      await bot.sendMessage(chatId, `${invoiceId}: text NOT sent (${out.error || r.status}). Still pending, reply APPROVE again once fixed.`);
+      return;
+    }
+
+    // Text is out. Now put the proposal on the document: add the new lines, then
+    // drop the generic placeholder(s). Inserting first means a failure leaves
+    // extra lines, never an empty estimate.
+    let itemNote = 'Line items updated.';
+    try {
+      const old = (inv.invoice_items || []).filter(it => /service call|diagnostic/i.test(it.name || ''));
+      const rows = prop.items.map((it, i) => ({
+        invoice_id: invoiceId, name: it.name, description: it.desc || '',
+        qty: it.qty || 1, price: it.price, unit: 'each', taxable: true, sort_order: i,
+      }));
+      const ins = await fetch(`${base}/invoice_items`, { method: 'POST', headers: sbHeaders(), body: JSON.stringify(rows) });
+      if (!ins.ok) throw new Error(`insert ${ins.status}`);
+      if (old.length) {
+        const del = await fetch(`${base}/invoice_items?id=in.(${old.map(o => o.id).join(',')})`, { method: 'DELETE', headers: sbHeaders() });
+        if (!del.ok) throw new Error(`delete ${del.status}`);
+      }
+    } catch (e) {
+      itemNote = `Line items NOT fully updated (${e.message}) - check ${invoiceId} in the app.`;
+    }
+    await bot.sendMessage(chatId, `Approved ${invoiceId}. Ballpark texted to ${phone} (${usd(prop.total)}). ${itemNote}`);
+  } catch (e) {
+    await revert();
+    await bot.sendMessage(chatId, `${invoiceId}: could not send (${e.message}). Still pending.`);
+  }
+}
+
 bot.on('message', async (msg) => {
   const chatId = String(msg.chat.id);
   const text = (msg.text || '').trim();
@@ -55,6 +164,14 @@ bot.on('message', async (msg) => {
     histories.delete(chatId);
     awaitingConfirm.delete(chatId);
     await bot.sendMessage(chatId, 'Fresh conversation started.');
+    return;
+  }
+
+  // Ballpark estimate approval for web/SMS/Yelp leads (see handleEstimatorReply).
+  const est = text.match(/^(approve|decline)\s+(EST\d{3,})\s*$/i);
+  if (est) {
+    try { await handleEstimatorReply(chatId, est[1].toLowerCase() === 'approve', est[2].toUpperCase()); }
+    catch (e) { await bot.sendMessage(chatId, `Could not handle that (${e.message}).`); }
     return;
   }
 
