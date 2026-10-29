@@ -60,6 +60,70 @@ function visitPhrase(inv) {
   return `${day} at ${time}`;
 }
 
+// Same math as calcItemTotal / calcTotals in higrade-invoicing/src/App.jsx.
+function estimateTotal(inv, items) {
+  const sub = items.reduce((s, it) => {
+    const gross = (Number(it.qty) || 1) * (Number(it.price) || 0);
+    if (!it.discount) return s + gross;
+    return s + (it.discount_type === '%' ? gross * (1 - it.discount / 100) : Math.max(0, gross - it.discount));
+  }, 0);
+  const dv = Number(inv.discount) || 0;
+  const disc = inv.discount_type === '%' ? sub * (dv / 100) : dv;
+  const after = sub - disc;
+  return (after + after * ((Number(inv.tax) || 0) / 100)).toFixed(2);
+}
+
+// Emails the estimate after the SMS. Returns a short note for the Telegram reply.
+async function emailEstimate(invoiceId, smsInv) {
+  const base = SB();
+  const id = encodeURIComponent(invoiceId);
+  const inv = (await (await fetch(
+    `${base}/invoices?id=eq.${id}&select=id,client_id,client_name,client_info,view_token,tax,discount,discount_type&limit=1`,
+    { headers: sbHeaders() })).json())[0];
+  if (!inv) throw new Error('estimate not found');
+
+  let email = (inv.client_info?.email || '').trim();
+  if (!email && inv.client_id) {
+    const c = (await (await fetch(`${base}/clients?id=eq.${inv.client_id}&select=email&limit=1`, { headers: sbHeaders() })).json())[0];
+    email = (c?.email || '').trim();
+  }
+  if (!email) {
+    console.log(`No email on file for ${invoiceId}`);
+    return '';
+  }
+
+  let token = inv.view_token;
+  if (!token) {
+    token = require('crypto').randomBytes(9).toString('base64url');
+    const p = await fetch(`${base}/invoices?id=eq.${id}`, {
+      method: 'PATCH', headers: sbHeaders(), body: JSON.stringify({ view_token: token }) });
+    if (!p.ok) throw new Error(`token save ${p.status}`);
+  }
+
+  const items = await (await fetch(
+    `${base}/invoice_items?invoice_id=eq.${id}&select=price,qty,discount,discount_type`, { headers: sbHeaders() })).json();
+  const total = estimateTotal(inv, Array.isArray(items) ? items : []);
+  const named = !/no name given|missed call|unknown/i.test(inv.client_name || '');
+  const first = named ? String(inv.client_name).trim().split(/\s+/)[0] : '';
+
+  const r = await fetch(`${APP_URL}/api/send-email`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      to: email,
+      invoiceId,
+      clientName: inv.client_name || '',
+      total,
+      viewLink: `${APP_URL}/v/${token}`,
+      bccAdmin: true,
+      subject: `Estimate ${invoiceId} from HI Grade Plumbing`,
+      message: `Aloha${first ? ' ' + first : ''},\n\nThank you for contacting HI Grade Plumbing. Your estimate ${invoiceId} is ready to review at the link above. Reply to this email or call/text 808-393-0015 with any questions.\n\nMahalo,\nHI Grade Plumbing`,
+    }),
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok || out.error || out.statusCode >= 400) throw new Error(out.error || out.message || r.status);
+  return `Emailed to ${email}.`;
+}
+
 async function handleEstimatorReply(chatId, approved, invoiceId) {
   const base = SB();
   const id = encodeURIComponent(invoiceId);
@@ -135,7 +199,15 @@ async function handleEstimatorReply(chatId, approved, invoiceId) {
     } catch (e) {
       itemNote = `Line items NOT fully updated (${e.message}) - check ${invoiceId} in the app.`;
     }
-    await bot.sendMessage(chatId, `Approved ${invoiceId}. Ballpark texted to ${phone} (${usd(prop.total)}). ${itemNote}`);
+    // Email the estimate too. Runs after the line items are swapped so the total
+    // matches the document. Never throws: the text already went out.
+    let emailNote = '';
+    try {
+      emailNote = await emailEstimate(invoiceId, inv);
+    } catch (e) {
+      emailNote = `Email NOT sent (${e.message}).`;
+    }
+    await bot.sendMessage(chatId, `Approved ${invoiceId}. Ballpark texted to ${phone} (${usd(prop.total)}). ${itemNote} ${emailNote}`.trim());
   } catch (e) {
     await revert();
     await bot.sendMessage(chatId, `${invoiceId}: could not send (${e.message}). Still pending.`);
